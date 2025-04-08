@@ -1,1 +1,1 @@
-# offline_rl
+# Offline RL Benchmark
