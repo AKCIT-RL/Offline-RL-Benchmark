@@ -8,7 +8,7 @@ from .data_collector import DataCollector, CustomStepDataCallback
 from .space import NumpySpace
 
 
-def wrapper_torch_fn(
+def wrapper_fn(
     env_name: str,
     num_actors: int,
     seed: int,
@@ -40,7 +40,7 @@ def wrapper_torch_fn(
 def wrapper_collector(
     env_name: str, num_envs: int, seed: int, action_repeat: int, device: str
 ):
-    env = wrapper_torch_fn(env_name, num_envs, seed, action_repeat, device)
+    env = wrapper_fn(env_name, num_envs, seed, action_repeat, device)
     return DataCollector(
         env,
         step_data_callback=CustomStepDataCallback,

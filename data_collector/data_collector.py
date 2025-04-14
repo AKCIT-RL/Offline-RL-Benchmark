@@ -157,6 +157,9 @@ class DataCollector:
         self._record_infos = record_infos
         self._buffer: Optional[EpisodeBuffer] = None
         self._episode_id = 0
+        self._list_terminated = np.array([0 for _ in range(self.env.num_envs)])
+        self._last_observation = [None for _ in range(self.env.num_envs)]
+        self._last_info = [None for _ in range(self.env.num_envs)]
         self._reset_storage()
 
     def _reset_storage(self):
@@ -175,47 +178,95 @@ class DataCollector:
     def step(
         self, action: ActType
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
-        """Gymnasium step method."""
+        """Gymnasium step method supporting batched environments."""
         obs, rew, terminated, info = self.env.step(action)
         truncated = info["time_outs"]
 
-        step_data = self._step_data_callback(
-            env=self.env,
-            obs=obs,
-            info=info,
-            action=action,
-            rew=rew,
-            terminated=terminated,
-            truncated=truncated,
+        for env_idx in range(self.env.num_envs):
+            if self._list_terminated[env_idx] == 0:
+                env_obs = (
+                    obs[env_idx] if isinstance(obs, (np.ndarray, torch.Tensor)) else obs
+                )
+                env_info = {
+                    k: v[env_idx] if isinstance(v, (np.ndarray, torch.Tensor)) else v
+                    for k, v in info.items()
+                }
+                env_action = (
+                    action[env_idx]
+                    if isinstance(action, (np.ndarray, torch.Tensor))
+                    else action
+                )
+                env_rew = (
+                    rew[env_idx] if isinstance(rew, (np.ndarray, torch.Tensor)) else rew
+                )
+                env_terminated = (
+                    terminated[env_idx]
+                    if isinstance(terminated, (np.ndarray, torch.Tensor))
+                    else terminated
+                )
+                env_truncated = (
+                    truncated[env_idx]
+                    if isinstance(truncated, (np.ndarray, torch.Tensor))
+                    else truncated
+                )
+
+                step_data = self._step_data_callback(
+                    env=self.env,
+                    obs=env_obs,
+                    info=env_info,
+                    action=env_action,
+                    rew=env_rew,
+                    terminated=env_terminated,
+                    truncated=env_truncated,
+                )
+
+                # Space validation warnings
+                if not self._storage.observation_space.contains(
+                    step_data["observation"]
+                ):
+                    warnings.warn(
+                        f"Observation for env {env_idx} is not in observation space.\n"
+                        f"Observation: {step_data['observation']}\nObservation type: {type(step_data['observation'])}\n"
+                        f"Observation shape: {step_data['observation'].shape}\nSpace: {self._storage.observation_space}"
+                    )
+                if not self._storage.action_space.contains(step_data["action"]):
+                    warnings.warn(
+                        f"Action for env {env_idx} is not in action space.\n"
+                        f"Action: {step_data['action']}\nSpace: {self._storage.action_space}",
+                    )
+
+                if not self._record_infos:
+                    step_data["info"] = {}
+
+                # Update buffer with new step data
+                self._buffer[env_idx] = self._buffer[env_idx].add_step_data(step_data)
+
+                # Handle episode termination
+                if step_data["termination"] or step_data["truncation"]:
+                    self._list_terminated[env_idx] = 1
+                    self._last_observation[env_idx] = step_data["observation"]
+                    self._last_info[env_idx] = step_data["info"]
+
+        # Process step data for each environment
+        if self._list_terminated.sum() == len(self._list_terminated):
+            # Handle episode termination
+            self._episode_id += self.env.num_envs
+            for env_idx in range(self.env.num_envs):
+                self._storage.update_episodes([self._buffer[env_idx]])
+                self._buffer[env_idx] = EpisodeBuffer(
+                    id=self._episode_id + env_idx,
+                    observations=self._last_observation[env_idx],
+                    infos=self._last_info[env_idx],
+                )
+
+        return (
+            obs,
+            rew,
+            self._list_terminated,
+            truncated,
+            info,
+            {"env_state": self.env.env_state},
         )
-
-        if not self._storage.observation_space.contains(step_data["observation"]):
-            warnings.warn(
-                "Observation is not in observation space.\n"
-                f"Observation: {step_data['observation']}\nObservation type: {type(step_data['observation'])}\nObservation shape: {step_data['observation'].shape}\n"
-                f"Space: {self._storage.observation_space}"
-            )
-        if not self._storage.action_space.contains(step_data["action"]):
-            warnings.warn(
-                "Action is not in action space.\n"
-                f"Action: {step_data['action']}\nSpace: {self._storage.action_space}",
-            )
-
-        assert self._buffer is not None
-        if not self._record_infos:
-            step_data["info"] = {}
-        self._buffer = self._buffer.add_step_data(step_data)
-
-        if step_data["termination"] or step_data["truncation"]:
-            self._storage.update_episodes([self._buffer])
-            self._episode_id += 1
-            self._buffer = EpisodeBuffer(
-                id=self._episode_id,
-                observations=step_data["observation"],
-                infos=step_data["info"],
-            )
-
-        return obs, rew, terminated, truncated, info
 
     def reset(
         self,
@@ -223,44 +274,32 @@ class DataCollector:
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[ObsType, dict[str, Any]]:
-        """Gymnasium environment reset.
-
-        If no seed is set, one will be automatically generated, for reproducibility,
-        unless ``minari_autoseed=False`` in the ``options`` dictionary.
-
-        Args:
-            seed (optional int): The seed that is used to initialize the environment's PRNG.
-                If no seed is specified, one will be automatically generated (by default).
-            options (optional dict): Additional information to specify how the environment is reset.
-                Set ``minari_autoseed=False`` to disable automatic seeding.
-
-        Returns:
-            observation (ObsType): Observation of the initial state.
-            info (dictionary): Auxiliary information complementing ``observation``.
-        """
+        """Gymnasium environment reset."""
         self._flush_to_storage()
 
         autoseed_enabled = (not options) or options.get("minari_autoseed", True)
         if seed is None and autoseed_enabled:
             seed = secrets.randbits(AUTOSEED_BIT_SIZE)
 
+        self._list_terminated = np.array([0 for _ in range(self.env.num_envs)])
+
         obs = self.env.reset()
-        step_data = self._step_data_callback(env=self.env, obs=obs, info={})
 
-        if not self._storage.observation_space.contains(step_data["observation"]):
-            warnings.warn(
-                "Observation is not in observation space.\n"
-                f"Observation: {step_data['observation']}\nSpace: {self._storage.observation_space}"
+        # Initialize buffer list for each environment
+        self._buffer = []
+        for i in range(self.env.num_envs):
+            env_obs = obs[i] if isinstance(obs, (np.ndarray, torch.Tensor)) else obs
+            step_data = self._step_data_callback(env=self.env, obs=env_obs, info={})
+            self._buffer.append(
+                EpisodeBuffer(
+                    id=self._episode_id + i,
+                    seed=seed,
+                    options=options,
+                    observations=step_data["observation"],
+                    infos=step_data["info"] if self._record_infos else None,
+                )
             )
-
-        self._buffer = EpisodeBuffer(
-            id=self._episode_id,
-            seed=seed,
-            options=options,
-            observations=step_data["observation"],
-            infos=step_data["info"] if self._record_infos else None,
-        )
-        return obs, {}
+        return obs, {"env_state": self.env.env_state}
 
     def add_to_dataset(self, dataset: MinariDataset):
         """Add extra data to Minari dataset from collector environment buffers (DataCollector).
@@ -344,11 +383,13 @@ class DataCollector:
         return MinariDataset(dataset_path)
 
     def _flush_to_storage(self):
-        if self._buffer is not None and len(self._buffer) > 0:
-            if not self._buffer.terminations[-1]:
-                self._buffer.truncations[-1] = True
-            self._storage.update_episodes([self._buffer])
-            self._episode_id += 1
+        """Flush all buffers to storage."""
+        if self._buffer is not None:
+            for buffer in self._buffer:
+                if len(buffer) > 0:
+                    if not buffer.terminations[-1]:
+                        buffer.truncations[-1] = True
+                    self._storage.update_episodes([buffer])
         self._buffer = None
 
     def _save_to_disk(
@@ -394,5 +435,5 @@ class DataCollector:
         self._buffer = None
         shutil.rmtree(self._tmp_dir.name)
 
-    def action_sample(self):
-        return torch.randn((1, self.env.num_actions), device=self.env.device)
+    def action_sample(self, num_envs: int = 1):
+        return torch.randn((num_envs, self.env.num_actions), device=self.env.device)

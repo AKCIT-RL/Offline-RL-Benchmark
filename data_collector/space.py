@@ -15,7 +15,7 @@ class NumpySpace(gym.spaces.Space[np.ndarray]):
         # Check type first is slightly safer
         return (
             isinstance(x, np.ndarray)
-            and x.shape == self.shape
+            and x.shape[-1] == self.shape[-1]
             and x.dtype == self.dtype
         )
 
