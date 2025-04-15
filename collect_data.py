@@ -52,15 +52,7 @@ def get_checkpoint_path(model_checkpoint: str):
     return latest_ckpts
 
 
-def get_inference_fn(model_checkpoint: str, env_name: str):
-    ckpt_path = str(epath.Path(model_checkpoint).resolve())
-    FINETUNE_PATH = epath.Path(ckpt_path)
-    latest_ckpts = list(FINETUNE_PATH.glob("*"))
-    latest_ckpts = [ckpt for ckpt in latest_ckpts if ckpt.is_dir()]
-    latest_ckpts.sort(key=lambda x: int(x.name))
-    latest_ckpt = latest_ckpts[-1]
-    restore_checkpoint_path = latest_ckpt
-
+def get_inference_fn(restore_checkpoint_path: str, env_name: str):
     ppo_params = locomotion_params.brax_ppo_config(env_name)
     ppo_training_params = dict(ppo_params)
     ppo_training_params["num_timesteps"] = 0
