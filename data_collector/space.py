@@ -51,7 +51,7 @@ class NumpySpace(gym.spaces.Space[np.ndarray]):
 
 
 @serialize_space.register(NumpySpace)
-def serialize_custom_space(space: NumpySpace, to_string=True):
+def serialize_space(space: NumpySpace, to_string=True):
     result = {}
     result["type"] = "NumpySpace"
     result["shape"] = list(space.shape)
@@ -63,9 +63,8 @@ def serialize_custom_space(space: NumpySpace, to_string=True):
 
 
 @deserialize_space.register("NumpySpace")
-def deserialize_custom_space(space_dict) -> NumpySpace:
+def deserialize_space(*, space_dict) -> NumpySpace:
     assert space_dict["type"] == "NumpySpace"
     shape = tuple(space_dict["shape"])
     dtype = np.dtype(space_dict["dtype"])
-
     return NumpySpace(shape=shape, dtype=dtype)

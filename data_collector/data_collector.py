@@ -160,6 +160,7 @@ class DataCollector:
         self._list_terminated = np.array([0 for _ in range(self.env.num_envs)])
         self._last_observation = [None for _ in range(self.env.num_envs)]
         self._last_info = [None for _ in range(self.env.num_envs)]
+        self._timesteps = 0
         self._reset_storage()
 
     def _reset_storage(self):
@@ -240,7 +241,7 @@ class DataCollector:
 
                 # Update buffer with new step data
                 self._buffer[env_idx] = self._buffer[env_idx].add_step_data(step_data)
-
+                self._timesteps += 1
                 # Handle episode termination
                 if step_data["termination"] or step_data["truncation"]:
                     self._list_terminated[env_idx] = 1
@@ -437,3 +438,6 @@ class DataCollector:
 
     def action_sample(self, num_envs: int = 1):
         return torch.randn((num_envs, self.env.num_actions), device=self.env.device)
+
+    def get_timesteps(self):
+        return self._timesteps
