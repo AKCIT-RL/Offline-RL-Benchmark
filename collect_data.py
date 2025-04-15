@@ -137,7 +137,7 @@ def main(config: Config):
 
             rng = jax.random.PRNGKey(0)
 
-            obs, info = env.reset()
+            _, info = env.reset()
             env_state = info["env_state"].obs
 
             timesteps = 0
@@ -145,7 +145,7 @@ def main(config: Config):
             while timesteps < samples_per_ckpt:
                 terminated = torch.zeros(config.num_envs, device=config.device).bool()
                 while not terminated.all():
-                    action, _ = inference_fn(info["env_state"].obs, rng)
+                    action, _ = inference_fn(env_state, rng)
                     _, _, terminated, _, _, info = env.step(
                         wrapper_torch._jax_to_torch(action)
                     )
@@ -169,7 +169,7 @@ def main(config: Config):
 
         rng = jax.random.PRNGKey(0)
 
-        obs, info = env.reset()
+        _, info = env.reset()
         env_state = info["env_state"].obs
 
         timesteps = 0
@@ -177,7 +177,7 @@ def main(config: Config):
         while timesteps < config.num_samples:
             terminated = torch.zeros(config.num_envs, device=config.device).bool()
             while not terminated.all():
-                action, _ = inference_fn(env_state.obs, rng)
+                action, _ = inference_fn(env_state, rng)
                 _, _, terminated, _, _, info = env.step(
                     wrapper_torch._jax_to_torch(action)
                 )
@@ -191,6 +191,9 @@ def main(config: Config):
     else:
         raise ValueError(f"Difficulty {config.difficulty} not supported")
 
+    print(
+        f"Creating dataset {config.env_name}-{config.difficulty}-v{config.dataset_version}"
+    )
     dataset = env.create_dataset(
         dataset_id=f"playground/{config.env_name}-{config.difficulty}-v{config.dataset_version}",
         algorithm_name=config.algorithm_name,
@@ -198,6 +201,9 @@ def main(config: Config):
         author_email=config.author_email,
         code_permalink=config.code_permalink,
         description=config.description,
+    )
+    print(
+        f"Dataset created with {dataset.total_steps} timesteps and {dataset.total_episodes} episodes"
     )
 
 
