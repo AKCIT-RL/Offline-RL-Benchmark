@@ -97,6 +97,7 @@ def main(config: Config):
         config.action_repeat,
         config.device,
     )
+    rng = jax.random.PRNGKey(0)
 
     if config.difficulty == "random":
         env.reset()
@@ -119,16 +120,6 @@ def main(config: Config):
         for ckpt in restore_checkpoint_path:
             inference_fn = get_inference_fn(ckpt, config.env_name)
 
-            env = wrapper_collector(
-                config.env_name,
-                config.num_envs,
-                config.seed,
-                config.action_repeat,
-                config.device,
-            )
-
-            rng = jax.random.PRNGKey(0)
-
             _, info = env.reset()
             env_state = info["env_state"].obs
 
@@ -150,17 +141,6 @@ def main(config: Config):
     elif config.difficulty == "expert":
         restore_checkpoint_path = get_checkpoint_path(config.model_checkpoint)
         inference_fn = get_inference_fn(restore_checkpoint_path[-1], config.env_name)
-
-        env = wrapper_collector(
-            config.env_name,
-            config.num_envs,
-            config.seed,
-            config.action_repeat,
-            config.device,
-        )
-
-        rng = jax.random.PRNGKey(0)
-
         _, info = env.reset()
         env_state = info["env_state"].obs
 
