@@ -44,6 +44,9 @@ def wrapper_collector(
     return DataCollector(
         env,
         step_data_callback=CustomStepDataCallback,
-        observation_space=NumpySpace(shape=env.num_obs, dtype=np.float32),
+        observation_space=NumpySpace(
+            shape=(env.num_obs,) if type(env.num_obs) == int else env.num_obs,
+            dtype=np.float32,
+        ),
         action_space=NumpySpace(shape=(env.num_actions,), dtype=np.float32),
     )

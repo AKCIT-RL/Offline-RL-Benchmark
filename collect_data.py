@@ -119,7 +119,7 @@ def main(config: Config):
         samples_per_ckpt = config.num_samples // len(restore_checkpoint_path)
         for ckpt in restore_checkpoint_path:
             inference_fn = get_inference_fn(ckpt, config.env_name)
-
+            env.reset_timesteps()
             _, info = env.reset()
             env_state = info["env_state"].obs
 

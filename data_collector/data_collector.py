@@ -441,3 +441,6 @@ class DataCollector:
 
     def get_timesteps(self):
         return self._timesteps
+
+    def reset_timesteps(self):
+        self._timesteps = 0
