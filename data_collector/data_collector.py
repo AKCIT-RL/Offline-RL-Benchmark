@@ -294,7 +294,7 @@ class DataCollector:
             self._buffer.append(
                 EpisodeBuffer(
                     id=self._episode_id + i,
-                    seed=seed,
+                    # seed=seed,
                     options=options,
                     observations=step_data["observation"],
                     infos=step_data["info"] if self._record_infos else None,

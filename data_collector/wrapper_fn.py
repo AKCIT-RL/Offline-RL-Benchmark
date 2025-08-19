@@ -1,11 +1,49 @@
 import torch
 import numpy as np
+import jax
 
 from mujoco_playground import wrapper, wrapper_torch
 from mujoco_playground import registry
 
 from .data_collector import DataCollector, CustomStepDataCallback
 from .space import NumpySpace
+
+
+class WrapperTorch(wrapper_torch.RSLRLBraxWrapper):
+    def __init__(
+      self,
+      env,
+      num_actors,
+      seed,
+      episode_length,
+      action_repeat,
+      randomization_fn=None,
+      render_callback=None,
+      device_rank=None,
+  ):
+        super().__init__(env, num_actors, seed, episode_length, action_repeat, randomization_fn, render_callback, device_rank)
+
+    def reset(self):
+        self.key, key_reset = jax.random.split(self.key)
+        _key_reset = jax.random.split(key_reset, self.batch_size)
+        self.env_state = self.reset_fn(_key_reset)
+
+        if self.asymmetric_obs:
+            obs = wrapper_torch._jax_to_torch(self.env_state.obs["state"])
+        # critic_obs = jax_to_torch(self.env_state.obs["privileged_state"])
+        else:
+            obs = wrapper_torch._jax_to_torch(self.env_state.obs)
+        return obs
+
+    def reset_with_critic_obs(self):
+        self.key, key_reset = jax.random.split(self.key)
+        _key_reset = jax.random.split(key_reset, self.batch_size)
+        self.env_state = self.reset_fn(_key_reset)
+        obs = wrapper_torch._jax_to_torch(self.env_state.obs["state"])
+        critic_obs = wrapper_torch._jax_to_torch(self.env_state.obs["privileged_state"])
+        return obs, critic_obs
+
+
 
 
 def wrapper_fn(
@@ -23,7 +61,7 @@ def wrapper_fn(
     def render_callback(_, state):
         render_trajectory.append(state)
 
-    env_wrapped = wrapper_torch.RSLRLBraxWrapper(
+    env_wrapped = WrapperTorch(
         env,
         num_actors,
         seed,
