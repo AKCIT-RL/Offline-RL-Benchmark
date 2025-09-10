@@ -48,6 +48,7 @@ class Config:
     code_permalink: str = "https://github.com/AKCIT-RL/mujoco_playground"
     description: Optional[str] = None
     minari_dataset_path: str = "/home/luana/OfflineRL/CORL/datasets"
+    command_type: str = None
 
 
 def get_checkpoint_path(model_checkpoint: str):
@@ -105,6 +106,7 @@ def main(config: Config):
         config.seed,
         config.action_repeat,
         config.device,
+        config.command_type,
     )
     rng = jax.random.PRNGKey(0)
 
@@ -191,12 +193,17 @@ def main(config: Config):
 
     else:
         raise ValueError(f"Difficulty {config.difficulty} not supported")
+    
+    if config.command_type is not None:
+        dataset_name = f"{config.env_name}-{config.command_type}-{config.difficulty}-v{config.dataset_version}"
+    else:
+        dataset_name = f"{config.env_name}-{config.difficulty}-v{config.dataset_version}"
 
     print(
-        f"Creating dataset {config.env_name}-{config.difficulty}-v{config.dataset_version}"
+        f"Creating dataset {dataset_name}"
     )
     dataset = env.create_dataset(
-        dataset_id=f"playground/{config.env_name}-{config.difficulty}-v{config.dataset_version}",
+        dataset_id=f"playground/{dataset_name}",
         algorithm_name=config.algorithm_name,
         author=config.author,
         author_email=config.author_email,

@@ -60,12 +60,12 @@ class CustomStepDataCallback(StepDataCallback):
             "reward": (
                 np.squeeze(rew.cpu().numpy()) if isinstance(rew, torch.Tensor) else rew
             ),
-            "termination": (
+            "terminated": (
                 np.squeeze(terminated.cpu().numpy()).astype(bool)
                 if isinstance(terminated, torch.Tensor)
                 else terminated
             ),
-            "truncation": (
+            "truncated": (
                 np.squeeze(truncated.cpu().numpy()).astype(bool)
                 if isinstance(truncated, torch.Tensor)
                 else truncated
@@ -243,7 +243,7 @@ class DataCollector:
                 self._buffer[env_idx] = self._buffer[env_idx].add_step_data(step_data)
                 self._timesteps += 1
                 # Handle episode termination
-                if step_data["termination"] or step_data["truncation"]:
+                if step_data["terminated"] or step_data["truncated"]:
                     self._list_terminated[env_idx] = 1
                     self._last_observation[env_idx] = step_data["observation"]
                     self._last_info[env_idx] = step_data["info"]
