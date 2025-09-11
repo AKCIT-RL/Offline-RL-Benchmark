@@ -31,11 +31,20 @@ class WrapperTorch(wrapper_torch.RSLRLBraxWrapper):
         _key_reset = jax.random.split(key_reset, self.batch_size)
         self.env_state = self.reset_fn(_key_reset)
 
-        if self.command_type == "easy":
+        if self.command_type == "fowardbackward":
             command = jp.concatenate([
                 self.env_state.info["command"][:, [0]],  # shape (batch, 1)
                 jp.zeros((self.env_state.info["command"].shape[0], 2), dtype=self.env_state.info["command"].dtype)
             ], axis=1)
+            self.env_state.info["command"] = command
+        elif self.command_type == "foward":
+            command = jp.concatenate([
+                jp.abs(self.env_state.info["command"][:, [0]]),  # shape (batch, 1)
+                jp.zeros((self.env_state.info["command"].shape[0], 2), dtype=self.env_state.info["command"].dtype)
+            ], axis=1)
+            self.env_state.info["command"] = command
+        elif self.command_type == "fowardfixed":
+            command = jp.array([1.5, 0, 0])
             self.env_state.info["command"] = command
 
         if self.asymmetric_obs:
