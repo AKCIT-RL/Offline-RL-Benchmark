@@ -44,7 +44,7 @@ class WrapperTorch(wrapper_torch.RSLRLBraxWrapper):
             ], axis=1)
             self.env_state.info["command"] = command
         elif self.command_type == "fowardfixed":
-            command = jp.array([1.5, 0, 0])
+            command = jp.array([[1.0, 0.0, 0.0]])
             self.env_state.info["command"] = command
 
         if self.asymmetric_obs:
