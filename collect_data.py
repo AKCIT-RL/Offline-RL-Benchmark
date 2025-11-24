@@ -1,3 +1,4 @@
+from string import printable
 import pyrallis
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, Optional, SupportsFloat, Type
@@ -68,8 +69,10 @@ def get_inference_fn(restore_checkpoint_path: str, env_name: str):
     network_factory = ppo_networks.make_ppo_networks
     if "network_factory" in ppo_params:
         del ppo_training_params["network_factory"]
+        nf = ppo_params.network_factory
+        nf["value_obs_key"] = "state"
         network_factory = functools.partial(
-            ppo_networks.make_ppo_networks, **ppo_params.network_factory
+            ppo_networks.make_ppo_networks, **nf
         )
 
     randomizer = registry.get_domain_randomizer(env_name)
@@ -84,7 +87,6 @@ def get_inference_fn(restore_checkpoint_path: str, env_name: str):
     make_inference_fn, params, metrics = train_fn(
         environment=registry.load(env_name),
         eval_env=registry.load(env_name),
-        wrap_env_fn=wrapper.wrap_for_brax_training,
         restore_checkpoint_path=restore_checkpoint_path,  # restore from the checkpoint!
         seed=1,
     )
@@ -174,7 +176,6 @@ def main(config: Config):
             env.reset_timesteps()
             _, info = env.reset()
             env_state = info["env_state"].obs
-
             timesteps = 0
             pbar = tqdm(total=samples_per_ckpt, desc="Collecting samples")
             while timesteps < samples_per_ckpt:

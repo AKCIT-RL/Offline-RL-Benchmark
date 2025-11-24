@@ -29,6 +29,8 @@ from minari.dataset.minari_dataset import MinariDataset, parse_dataset_id
 from minari.namespace import create_namespace, list_local_namespaces
 from minari.utils import _generate_dataset_metadata, _generate_dataset_path
 
+from mujoco_playground import wrapper_torch
+
 AUTOSEED_BIT_SIZE = 64
 
 
@@ -181,8 +183,9 @@ class DataCollector:
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         """Gymnasium step method supporting batched environments."""
         obs, rew, terminated, info = self.env.step(action)
-        truncated = info["time_outs"]
-
+        action = np.asarray([action])
+        truncated = terminated
+ 
         for env_idx in range(self.env.num_envs):
             if self._list_terminated[env_idx] == 0:
                 env_obs = (
@@ -259,7 +262,6 @@ class DataCollector:
                     observations=self._last_observation[env_idx],
                     infos=self._last_info[env_idx],
                 )
-
         return (
             obs,
             rew,
