@@ -13,6 +13,8 @@ import tempfile
 import warnings
 import secrets
 from typing import Any, Callable, Dict, Optional, SupportsFloat, Type
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import torch
 import numpy as np
@@ -163,6 +165,9 @@ class DataCollector:
         self._last_observation = [None for _ in range(self.env.num_envs)]
         self._last_info = [None for _ in range(self.env.num_envs)]
         self._timesteps = 0
+        self._timesteps_lock = threading.Lock()
+        self._storage_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=self.env.num_envs)
         self._reset_storage()
 
     def _reset_storage(self):
@@ -178,90 +183,132 @@ class DataCollector:
             **data_format_kwarg,
         )
 
+    def _process_env_step(self, env_idx, obs, action, rew, terminated, truncated, info):
+        """Process step data for a single environment (parallelizable)."""
+        if self._list_terminated[env_idx] == 0:
+            env_obs = (
+                obs[env_idx] if isinstance(obs, (np.ndarray, torch.Tensor)) else obs
+            )
+            env_info = {
+                k: v[env_idx] if isinstance(v, (np.ndarray, torch.Tensor)) else v
+                for k, v in info.items()
+            }
+            env_action = (
+                action[env_idx]
+                if isinstance(action, (np.ndarray, torch.Tensor))
+                else action
+            )
+            env_rew = (
+                rew[env_idx] if isinstance(rew, (np.ndarray, torch.Tensor)) else rew
+            )
+            env_terminated = (
+                terminated[env_idx]
+                if isinstance(terminated, (np.ndarray, torch.Tensor))
+                else terminated
+            )
+            env_truncated = (
+                truncated[env_idx]
+                if isinstance(truncated, (np.ndarray, torch.Tensor))
+                else truncated
+            )
+
+            step_data = self._step_data_callback(
+                env=self.env,
+                obs=env_obs,
+                info=env_info,
+                action=env_action,
+                rew=env_rew,
+                terminated=env_terminated,
+                truncated=env_truncated,
+            )
+
+            # Space validation warnings
+            if not self._storage.observation_space.contains(
+                step_data["observation"]
+            ):
+                warnings.warn(
+                    f"Observation for env {env_idx} is not in observation space.\n"
+                    f"Observation: {step_data['observation']}\nObservation type: {type(step_data['observation'])}\n"
+                    f"Observation shape: {step_data['observation'].shape}\nSpace: {self._storage.observation_space}"
+                )
+            if not self._storage.action_space.contains(step_data["action"]):
+                warnings.warn(
+                    f"Action for env {env_idx} is not in action space.\n"
+                    f"Action: {step_data['action']}\nSpace: {self._storage.action_space}",
+                )
+
+            if not self._record_infos:
+                step_data["info"] = {}
+
+            # Update buffer with new step data
+            self._buffer[env_idx] = self._buffer[env_idx].add_step_data(step_data)
+            
+            # Thread-safe timestep increment
+            with self._timesteps_lock:
+                self._timesteps += 1
+            
+            # Handle episode termination
+            if step_data["terminated"] or step_data["truncated"]:
+                self._list_terminated[env_idx] = 1
+                self._last_observation[env_idx] = step_data["observation"]
+                self._last_info[env_idx] = step_data["info"]
+
+    def _prepare_new_buffer(self, env_idx, new_episode_id):
+        """Prepare a new episode buffer for a single environment (parallelizable)."""
+        last_info = self._last_info[env_idx]
+        return EpisodeBuffer(
+            id=new_episode_id + env_idx,
+            observations=self._last_observation[env_idx],
+            infos=last_info if (self._record_infos and last_info) else None,
+        )
+
     def step(
         self, action: ActType
     ) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         """Gymnasium step method supporting batched environments."""
-        obs, rew, terminated, info = self.env.step(action)
-        action = np.asarray([action])
-        truncated = terminated
+        obs, rew, terminated, truncated, info = self.env.step(action)
+        action = np.asarray([action]) if len(action.shape) < 2  else np.asarray(action)
  
+        # Parallel processing of step data for each environment
+        futures = []
         for env_idx in range(self.env.num_envs):
-            if self._list_terminated[env_idx] == 0:
-                env_obs = (
-                    obs[env_idx] if isinstance(obs, (np.ndarray, torch.Tensor)) else obs
-                )
-                env_info = {
-                    k: v[env_idx] if isinstance(v, (np.ndarray, torch.Tensor)) else v
-                    for k, v in info.items()
-                }
-                env_action = (
-                    action[env_idx]
-                    if isinstance(action, (np.ndarray, torch.Tensor))
-                    else action
-                )
-                env_rew = (
-                    rew[env_idx] if isinstance(rew, (np.ndarray, torch.Tensor)) else rew
-                )
-                env_terminated = (
-                    terminated[env_idx]
-                    if isinstance(terminated, (np.ndarray, torch.Tensor))
-                    else terminated
-                )
-                env_truncated = (
-                    truncated[env_idx]
-                    if isinstance(truncated, (np.ndarray, torch.Tensor))
-                    else truncated
-                )
-
-                step_data = self._step_data_callback(
-                    env=self.env,
-                    obs=env_obs,
-                    info=env_info,
-                    action=env_action,
-                    rew=env_rew,
-                    terminated=env_terminated,
-                    truncated=env_truncated,
-                )
-
-                # Space validation warnings
-                if not self._storage.observation_space.contains(
-                    step_data["observation"]
-                ):
-                    warnings.warn(
-                        f"Observation for env {env_idx} is not in observation space.\n"
-                        f"Observation: {step_data['observation']}\nObservation type: {type(step_data['observation'])}\n"
-                        f"Observation shape: {step_data['observation'].shape}\nSpace: {self._storage.observation_space}"
-                    )
-                if not self._storage.action_space.contains(step_data["action"]):
-                    warnings.warn(
-                        f"Action for env {env_idx} is not in action space.\n"
-                        f"Action: {step_data['action']}\nSpace: {self._storage.action_space}",
-                    )
-
-                if not self._record_infos:
-                    step_data["info"] = {}
-
-                # Update buffer with new step data
-                self._buffer[env_idx] = self._buffer[env_idx].add_step_data(step_data)
-                self._timesteps += 1
-                # Handle episode termination
-                if step_data["terminated"] or step_data["truncated"]:
-                    self._list_terminated[env_idx] = 1
-                    self._last_observation[env_idx] = step_data["observation"]
-                    self._last_info[env_idx] = step_data["info"]
+            future = self._executor.submit(
+                self._process_env_step,
+                env_idx, obs, action, rew, terminated, truncated, info
+            )
+            futures.append(future)
+        
+        # Wait for all parallel tasks to complete
+        for future in futures:
+            future.result()
 
         # Process step data for each environment
         if self._list_terminated.sum() == len(self._list_terminated):
-            # Handle episode termination
-            self._episode_id += self.env.num_envs
+            # Prepare new episode ID
+            new_episode_id = self._episode_id + self.env.num_envs
+            
+            # Parallel preparation of new buffers
+            futures = []
+            for env_idx in range(self.env.num_envs):
+                future = self._executor.submit(
+                    self._prepare_new_buffer, env_idx, new_episode_id
+                )
+                futures.append(future)
+            
+            # Collect new buffers in order
+            new_buffers = []
+            for future in futures:
+                new_buffers.append(future.result())
+            
+            # Sequential storage updates (required for MinariStorage)
+            # This ensures episode IDs are written in sequential order
             for env_idx in range(self.env.num_envs):
                 self._storage.update_episodes([self._buffer[env_idx]])
-                self._buffer[env_idx] = EpisodeBuffer(
-                    id=self._episode_id + env_idx,
-                    observations=self._last_observation[env_idx],
-                    infos=self._last_info[env_idx],
-                )
+            
+            # Update buffers and episode ID
+            self._buffer = new_buffers
+            self._episode_id = new_episode_id
+                
         return (
             obs,
             rew,
@@ -286,6 +333,8 @@ class DataCollector:
 
         self._list_terminated = np.array([0 for _ in range(self.env.num_envs)])
 
+        self.reset_timesteps()
+
         obs = self.env.reset()
 
         # Initialize buffer list for each environment
@@ -299,7 +348,8 @@ class DataCollector:
                     # seed=seed,
                     options=options,
                     observations=step_data["observation"],
-                    infos=step_data["info"] if self._record_infos else None,
+                    # Pass None if infos is empty to let the first step establish the structure
+                    infos=step_data["info"] if (self._record_infos and step_data["info"]) else None,
                 )
             )
         return obs, {"env_state": self.env.env_state}
@@ -436,6 +486,7 @@ class DataCollector:
         """
         super().close()
         self._buffer = None
+        self._executor.shutdown(wait=True)
         shutil.rmtree(self._tmp_dir.name)
 
     def action_sample(self, num_envs: int = 1):

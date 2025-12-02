@@ -16,7 +16,7 @@ import mediapy as media
 
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.ppo import networks as ppo_networks
-from mujoco_playground.config import locomotion_params
+from mujoco_playground.config import locomotion_params, manipulation_params
 
 from mujoco_playground import registry
 from mujoco_playground import wrapper, wrapper_torch
@@ -62,7 +62,11 @@ def get_checkpoint_path(model_checkpoint: str):
 
 
 def get_inference_fn(restore_checkpoint_path: str, env_name: str):
-    ppo_params = locomotion_params.brax_ppo_config(env_name)
+    try:
+        ppo_params = locomotion_params.brax_ppo_config(env_name)
+    except:
+        ppo_params = manipulation_params.brax_ppo_config(env_name)
+
     ppo_training_params = dict(ppo_params)
     ppo_training_params["num_timesteps"] = 0
 
@@ -74,7 +78,6 @@ def get_inference_fn(restore_checkpoint_path: str, env_name: str):
         network_factory = functools.partial(
             ppo_networks.make_ppo_networks, **nf
         )
-
     randomizer = registry.get_domain_randomizer(env_name)
 
     train_fn = functools.partial(
@@ -87,7 +90,8 @@ def get_inference_fn(restore_checkpoint_path: str, env_name: str):
     make_inference_fn, params, metrics = train_fn(
         environment=registry.load(env_name),
         eval_env=registry.load(env_name),
-        restore_checkpoint_path=restore_checkpoint_path,  # restore from the checkpoint!
+        wrap_env_fn=wrapper.wrap_for_brax_training,
+        restore_checkpoint_path=restore_checkpoint_path,  
         seed=1,
     )
 
@@ -112,22 +116,7 @@ def main(config: Config):
     )
     rng = jax.random.PRNGKey(0)
 
-    if config.difficulty == "random":
-        env.reset()
-        timesteps = 0
-        pbar = tqdm(total=config.num_samples, desc="Collecting samples")
-        while timesteps < config.num_samples:
-            terminated = torch.zeros(config.num_envs, device=config.device).bool()
-            truncated = torch.zeros(config.num_envs, device=config.device).bool()
-            while not terminated.all():
-                action = env.action_sample(config.num_envs)
-                _, _, terminated, truncated, _, _ = env.step(action)
-                pbar.update(env.get_timesteps() - timesteps)
-                timesteps = env.get_timesteps()
-            env.reset()
-        pbar.close()
-
-    elif config.difficulty == "medium":
+    if config.difficulty == "medium":
         samples_per_ckpt_model = config.num_samples // len(config.model_checkpoint)
         print(f"Collecting {samples_per_ckpt_model} samples per checkpoint.\nTotal checkpoints: {len(config.model_checkpoint)}")
 
@@ -150,15 +139,14 @@ def main(config: Config):
                 timesteps = 0
                 pbar = tqdm(total=samples_per_ckpt, desc="Collecting samples")
                 while timesteps < samples_per_ckpt:
-                    terminated = torch.zeros(config.num_envs, device=config.device).bool()
-                    while not terminated.all():
+                    terminated = jax.numpy.zeros(config.num_envs, dtype=bool)
+                    truncated = jax.numpy.zeros(config.num_envs, dtype=bool)
+                    while not (terminated.all() or truncated.all()):
                         action, _ = inference_fn(env_state, rng)
-                        _, _, terminated, _, _, info = env.step(
-                            wrapper_torch._jax_to_torch(action)
-                        )
+                        _, _, terminated, truncated, _, info = env.step(action)
                         env_state = info["env_state"].obs
-                        pbar.update(env.get_timesteps() - timesteps)
-                        timesteps = env.get_timesteps()
+                        pbar.update(config.num_envs)
+                        timesteps += config.num_envs
                     _, info = env.reset()
                     env_state = info["env_state"].obs
                 pbar.close()
@@ -179,15 +167,14 @@ def main(config: Config):
             timesteps = 0
             pbar = tqdm(total=samples_per_ckpt, desc="Collecting samples")
             while timesteps < samples_per_ckpt:
-                terminated = torch.zeros(config.num_envs, device=config.device).bool()
-                while not terminated.all():
+                terminated = jax.numpy.zeros(config.num_envs, dtype=bool)
+                truncated = jax.numpy.zeros(config.num_envs, dtype=bool)
+                while not (terminated.all() or truncated.all()):
                     action, _ = inference_fn(env_state, rng)
-                    _, _, terminated, _, _, info = env.step(
-                        wrapper_torch._jax_to_torch(action)
-                    )
+                    _, _, terminated, truncated, _, info = env.step(action)
                     env_state = info["env_state"].obs
-                    pbar.update(env.get_timesteps() - timesteps)
-                    timesteps = env.get_timesteps()
+                    pbar.update(config.num_envs)
+                    timesteps += config.num_envs
                 _, info = env.reset()
                 env_state = info["env_state"].obs
             pbar.close()

@@ -2,6 +2,11 @@ import torch
 import numpy as np
 import jax
 import jax.numpy as jp
+from collections.abc import Mapping
+try:
+    from flax.core import frozen_dict
+except ImportError:
+    frozen_dict = None
 
 from mujoco_playground import wrapper, wrapper_torch
 from mujoco_playground import registry
@@ -10,60 +15,91 @@ from .data_collector import DataCollector, CustomStepDataCallback
 from .space import NumpySpace
 
 
-class WrapperTorch(wrapper_torch.RSLRLBraxWrapper):
+class WrapperJax():
     def __init__(
-      self,
-      env,
-      num_actors,
-      seed,
-      episode_length,
-      action_repeat,
-      randomization_fn=None,
-      render_callback=None,
-      device_rank=None,
-      command_type=None,
-  ):
-        super().__init__(env, num_actors, seed, episode_length, action_repeat, randomization_fn, render_callback, device_rank)
+        self,
+        env,
+        env_cfg,
+        num_actors,
+        seed,
+        command_type=None,
+        device: str | torch.device | None = None,
+    ):
         self.command_type = command_type
+        self.env = env
+        self.device = device
+        self._batched_reset = jax.jit(jax.vmap(self.env.reset))
+        self._batched_step = jax.jit(jax.vmap(self.env.step))
+        self.rng = jax.random.PRNGKey(seed)
 
-    def reset(self):
-        self.key, key_reset = jax.random.split(self.key)
-        _key_reset = jax.random.split(key_reset, self.batch_size)
-        self.env_state = self.reset_fn(_key_reset)
+        self.episode_length = env_cfg.episode_length
+        self.num_actions = self.env.action_size
+        self.num_obs = self.env.observation_size["state"]
+        self.num_envs = num_actors
+
+        self.timesteps = 0
+
+    def _maybe_unfreeze(self, tree):
+        if frozen_dict and isinstance(tree, frozen_dict.FrozenDict):
+            return tree.unfreeze()
+        if isinstance(tree, Mapping):
+            return dict(tree)
+        return tree
+
+    def _tree_to_numpy(self, tree):
+        if isinstance(tree, Mapping):
+            return {k: self._tree_to_numpy(v) for k, v in tree.items()}
+        if isinstance(tree, (list, tuple)):
+            return type(tree)(self._tree_to_numpy(v) for v in tree)
+        return np.asarray(tree)
+
+    def _apply_command_override(self, env_state):
+        if self.command_type is None or "command" not in env_state.info:
+            return env_state
+
+        commands = env_state.info["command"]
+        zeros = jp.zeros_like(commands)
 
         if self.command_type == "fowardbackward":
-            command = jp.concatenate([
-                self.env_state.info["command"][:, [0]],  # shape (batch, 1)
-                jp.zeros((self.env_state.info["command"].shape[0], 2), dtype=self.env_state.info["command"].dtype)
-            ], axis=1)
-            self.env_state.info["command"] = command
+            command = zeros.at[..., 0].set(commands[..., 0])
         elif self.command_type == "foward":
-            command = jp.concatenate([
-                jp.abs(self.env_state.info["command"][:, [0]]),  # shape (batch, 1)
-                jp.zeros((self.env_state.info["command"].shape[0], 2), dtype=self.env_state.info["command"].dtype)
-            ], axis=1)
-            self.env_state.info["command"] = command
+            command = zeros.at[..., 0].set(jp.abs(commands[..., 0]))
         elif self.command_type == "fowardfixed":
-            command = jp.array([1.5, 0, 0])
-            self.env_state.info["command"] = command
-
-        if self.asymmetric_obs:
-            obs = wrapper_torch._jax_to_torch(self.env_state.obs["state"])
-        # critic_obs = jax_to_torch(self.env_state.obs["privileged_state"])
+            command = zeros.at[..., 0].set(1.0)
         else:
-            obs = wrapper_torch._jax_to_torch(self.env_state.obs)
+            return env_state
+
+        obs = self._maybe_unfreeze(env_state.obs)
+        obs["state"] = obs["state"].at[..., -3:].set(command)
+
+        info = self._maybe_unfreeze(env_state.info)
+        info["command"] = command
+
+        return env_state.replace(obs=obs, info=info)
+
+    def reset(self):
+        self.rng, reset_rng = jax.random.split(self.rng)
+        reset_keys = jax.random.split(reset_rng, self.num_envs)
+        self.env_state = self._batched_reset(reset_keys)
+        self.env_state = self._apply_command_override(self.env_state)
+        self.timesteps = 0
+        obs = np.asarray(self.env_state.obs["state"])
         return obs
 
-    def reset_with_critic_obs(self):
-        self.key, key_reset = jax.random.split(self.key)
-        _key_reset = jax.random.split(key_reset, self.batch_size)
-        self.env_state = self.reset_fn(_key_reset)
-        obs = wrapper_torch._jax_to_torch(self.env_state.obs["state"])
-        critic_obs = wrapper_torch._jax_to_torch(self.env_state.obs["privileged_state"])
-        return obs, critic_obs
+    def step(self, action):
+        if isinstance(action, torch.Tensor):
+            action = action.detach().cpu().numpy()
+        action = jp.asarray(action)
 
-
-
+        self.env_state = self._batched_step(self.env_state, action)
+        self.env_state = self._apply_command_override(self.env_state)
+        self.timesteps += 1
+        obs = np.asarray(self.env_state.obs["state"])
+        rew = np.asarray(self.env_state.reward)
+        done = np.asarray(self.env_state.done)
+        truncated = np.asarray([self.timesteps >= self.episode_length for _ in range(self.num_envs)])
+        info = self._tree_to_numpy(self.env_state.info)
+        return obs, rew, done, truncated, info
 
 def wrapper_fn(
     env_name: str,
@@ -75,17 +111,14 @@ def wrapper_fn(
 ):
     env = registry.load(env_name)
     env_cfg = registry.get_default_config(env_name)
-    randomizer = registry.get_domain_randomizer(env_name)
 
-    env_wrapped = WrapperTorch(
+    env_wrapped = WrapperJax(
         env,
+        env_cfg,
         num_actors,
         seed,
-        env_cfg.episode_length,
-        action_repeat,
-        randomization_fn=randomizer,
-        device_rank=int(device.split(":")[-1]) if "cuda:" in device else 0,
-        command_type=command_type
+        command_type=command_type,
+        device=device,
     )
 
     return env_wrapped
@@ -103,4 +136,5 @@ def wrapper_collector(
             dtype=np.float32,
         ),
         action_space=NumpySpace(shape=(env.num_actions,), dtype=np.float32),
+        record_infos=True
     )
