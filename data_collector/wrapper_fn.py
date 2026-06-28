@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import jax
 import jax.numpy as jp
+import gymnasium as gym
 from collections.abc import Mapping
 try:
     from flax.core import frozen_dict
@@ -12,7 +13,6 @@ from mujoco_playground import wrapper, wrapper_torch
 from mujoco_playground import registry
 
 from .data_collector import DataCollector, CustomStepDataCallback
-from .space import NumpySpace
 
 
 class WrapperJax():
@@ -32,6 +32,19 @@ class WrapperJax():
         self._batched_step = jax.jit(jax.vmap(self.env.step))
         self.rng = jax.random.PRNGKey(seed)
 
+        # Curriculum support: Go2RoughCurriculum needs score-based respawning
+        # between episodes (level up/down by terrain difficulty) to match the
+        # training-time state distribution. Detected via the env API.
+        base = self.env.unwrapped if hasattr(self.env, "unwrapped") else self.env
+        self.curriculum = hasattr(base, "reset_to") and hasattr(base, "compute_next_tile")
+        if self.curriculum:
+            self._curr_base = base
+            self._batched_reset_to = jax.jit(jax.vmap(base.reset_to))
+            self._terrain_level = None
+            self._terrain_col = None
+            self.curriculum_num_rows = base.num_rows
+            self.curriculum_num_cols = base.num_cols
+
         self.episode_length = env_cfg.episode_length
         self.num_actions = self.env.action_size
         if isinstance(self.env.observation_size, dict):
@@ -41,6 +54,9 @@ class WrapperJax():
         self.num_envs = num_actors
 
         self.timesteps = 0
+        # Optional integer tag injected into per-step infos to mark the source
+        # policy of each transition (used by the medium-expert dataset).
+        self.collection_source = None
 
     def _maybe_unfreeze(self, tree):
         if frozen_dict and isinstance(tree, frozen_dict.FrozenDict):
@@ -86,7 +102,10 @@ class WrapperJax():
     def reset(self):
         self.rng, reset_rng = jax.random.split(self.rng)
         reset_keys = jax.random.split(reset_rng, self.num_envs)
-        self.env_state = self._batched_reset(reset_keys)
+        if self.curriculum:
+            self.env_state = self._curriculum_reset(reset_keys)
+        else:
+            self.env_state = self._batched_reset(reset_keys)
         self.env_state = self._apply_command_override(self.env_state)
         self.timesteps = 0
         obs_field = self.env_state.obs
@@ -95,6 +114,31 @@ class WrapperJax():
         else:
             obs = np.asarray(obs_field)
         return obs
+
+    def _curriculum_reset(self, reset_keys):
+        """Respawn each env on its curriculum tile (score-based level up/down).
+
+        First episode: level 0 on a random column. Later episodes: promote/regress
+        the level based on the finished episode's progress and whether it timed out,
+        matching ``CurriculumAutoResetWrapper`` used during training.
+        """
+        if self._terrain_level is None:
+            cols = jax.random.randint(
+                reset_keys[0], (self.num_envs,), 0, self._curr_base.num_cols
+            )
+            levels = jp.zeros((self.num_envs,), dtype=jp.int32)
+        else:
+            max_progress = self.env_state.info["max_progress"]
+            truncation = jp.asarray(
+                [1.0 if self.timesteps >= self.episode_length else 0.0] * self.num_envs
+            )
+            levels, cols = self._curr_base.compute_next_tile(
+                self._terrain_level, self._terrain_col, max_progress, truncation
+            )
+        self._terrain_level = levels
+        self._terrain_col = cols
+        return self._batched_reset_to(reset_keys, levels, cols)
+
 
     def step(self, action):
         if isinstance(action, torch.Tensor):
@@ -113,6 +157,8 @@ class WrapperJax():
         done = np.asarray(self.env_state.done)
         truncated = np.asarray([self.timesteps >= self.episode_length for _ in range(self.num_envs)])
         info = self._tree_to_numpy(self.env_state.info)
+        if self.collection_source is not None:
+            info["source"] = np.full(self.num_envs, self.collection_source, dtype=np.int64)
         return obs, rew, done, truncated, info
 
 def wrapper_fn(
@@ -142,13 +188,17 @@ def wrapper_collector(
     env_name: str, num_envs: int, seed: int, action_repeat: int, device: str, command_type: str = None
 ):
     env = wrapper_fn(env_name, num_envs, seed, action_repeat, device, command_type)
+    obs_shape = (env.num_obs,) if type(env.num_obs) == int else tuple(env.num_obs)
     return DataCollector(
         env,
         step_data_callback=CustomStepDataCallback,
-        observation_space=NumpySpace(
-            shape=(env.num_obs,) if type(env.num_obs) == int else env.num_obs,
-            dtype=np.float32,
+        # gym.spaces.Box is serialized natively by Minari, so loading a dataset
+        # does not require importing this package first (unlike a custom space).
+        observation_space=gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
         ),
-        action_space=NumpySpace(shape=(env.num_actions,), dtype=np.float32),
+        action_space=gym.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(env.num_actions,), dtype=np.float32
+        ),
         record_infos=True
     )

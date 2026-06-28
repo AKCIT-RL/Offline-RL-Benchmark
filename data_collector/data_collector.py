@@ -15,6 +15,7 @@ import secrets
 from typing import Any, Callable, Dict, Optional, SupportsFloat, Type
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import dataclasses
 
 import torch
 import numpy as np
@@ -159,6 +160,10 @@ class DataCollector:
         self._action_space = action_space
 
         self._record_infos = record_infos
+        # Optional minimum episodic return required to persist an episode.
+        # When set, completed episodes whose summed reward is below this value
+        # are dropped at store time (used for the expert P90 filter).
+        self._episode_return_threshold: Optional[float] = None
         self._buffer: Optional[EpisodeBuffer] = None
         self._episode_id = 0
         self._list_terminated = np.array([0 for _ in range(self.env.num_envs)])
@@ -301,9 +306,14 @@ class DataCollector:
                 new_buffers.append(future.result())
             
             # Sequential storage updates (required for MinariStorage)
-            # This ensures episode IDs are written in sequential order
+            # Episodes dropped by the return-threshold gate must not leave holes
+            # in the id sequence, so reassign ids from total_episodes on store.
             for env_idx in range(self.env.num_envs):
-                self._storage.update_episodes([self._buffer[env_idx]])
+                if self._passes_return_threshold(self._buffer[env_idx]):
+                    buf = dataclasses.replace(
+                        self._buffer[env_idx], id=self._storage.total_episodes
+                    )
+                    self._storage.update_episodes([buf])
             
             # Update buffers and episode ID
             self._buffer = new_buffers
@@ -435,6 +445,14 @@ class DataCollector:
         self._save_to_disk(dataset_path, metadata)
         return MinariDataset(dataset_path)
 
+    def _passes_return_threshold(self, buffer) -> bool:
+        """Whether a completed episode buffer meets the minimum return to be stored."""
+        if self._episode_return_threshold is None:
+            return True
+        if len(buffer) == 0:
+            return False
+        return float(np.sum(buffer.rewards)) >= self._episode_return_threshold
+
     def _flush_to_storage(self):
         """Flush all buffers to storage."""
         if self._buffer is not None:
@@ -442,7 +460,11 @@ class DataCollector:
                 if len(buffer) > 0:
                     if not buffer.terminations[-1]:
                         buffer.truncations[-1] = True
-                    self._storage.update_episodes([buffer])
+                    if self._passes_return_threshold(buffer):
+                        buf = dataclasses.replace(
+                            buffer, id=self._storage.total_episodes
+                        )
+                        self._storage.update_episodes([buf])
         self._buffer = None
 
     def _save_to_disk(
@@ -497,3 +519,11 @@ class DataCollector:
 
     def reset_timesteps(self):
         self._timesteps = 0
+
+    def set_episode_return_threshold(self, threshold: Optional[float]):
+        """Set (or clear with None) the minimum episodic return for an episode to be stored."""
+        self._episode_return_threshold = threshold
+
+    def get_stored_steps(self) -> int:
+        """Total number of transitions already flushed to storage."""
+        return self._storage.total_steps
