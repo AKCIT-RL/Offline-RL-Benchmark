@@ -164,6 +164,17 @@ class DataCollector:
         # When set, completed episodes whose summed reward is below this value
         # are dropped at store time (used for the expert P90 filter).
         self._episode_return_threshold: Optional[float] = None
+        # Optional per-terrain-level return thresholds (curriculum all-levels
+        # collection). Maps difficulty level -> minimum episodic return. When set,
+        # each completed episode is gated against the threshold of the level it
+        # was collected on (read from the episode's ``terrain_level`` info), so
+        # every level keeps its own "expert" episodes instead of a single global
+        # threshold dropping all the harder (lower-return) levels.
+        self._per_level_return_thresholds: Optional[Dict[int, float]] = None
+        # Optional cap on stored transitions. With num_envs > 1 a finished batch
+        # holds several complete episodes; without a cap they would all be stored
+        # and overshoot the phase budget by up to num_envs episodes.
+        self._max_stored_steps: Optional[int] = None
         self._buffer: Optional[EpisodeBuffer] = None
         self._episode_id = 0
         self._list_terminated = np.array([0 for _ in range(self.env.num_envs)])
@@ -309,6 +320,8 @@ class DataCollector:
             # Episodes dropped by the return-threshold gate must not leave holes
             # in the id sequence, so reassign ids from total_episodes on store.
             for env_idx in range(self.env.num_envs):
+                if not self._can_store_more():
+                    break
                 if self._passes_return_threshold(self._buffer[env_idx]):
                     buf = dataclasses.replace(
                         self._buffer[env_idx], id=self._storage.total_episodes
@@ -445,18 +458,56 @@ class DataCollector:
         self._save_to_disk(dataset_path, metadata)
         return MinariDataset(dataset_path)
 
+    def _episode_terrain_level(self, buffer) -> Optional[int]:
+        """Return the curriculum difficulty level an episode was collected on.
+
+        Reads the constant per-step ``terrain_level`` info recorded in the
+        buffer. Uses the median to be robust to any single stale entry. Returns
+        ``None`` when the info is unavailable (non-curriculum env).
+        """
+        infos = getattr(buffer, "infos", None)
+        if not isinstance(infos, dict) or "terrain_level" not in infos:
+            return None
+        arr = np.asarray(infos["terrain_level"]).reshape(-1)
+        if arr.size == 0:
+            return None
+        return int(np.round(np.median(arr)))
+
     def _passes_return_threshold(self, buffer) -> bool:
         """Whether a completed episode buffer meets the minimum return to be stored."""
+        # Per-level gating (curriculum all-levels): compare against the threshold
+        # of the episode's own difficulty level. Levels without a threshold are
+        # kept unfiltered.
+        if self._per_level_return_thresholds is not None:
+            if len(buffer) == 0:
+                return False
+            level = self._episode_terrain_level(buffer)
+            threshold = (
+                self._per_level_return_thresholds.get(level)
+                if level is not None
+                else None
+            )
+            if threshold is None:
+                return True
+            return float(np.sum(buffer.rewards)) >= threshold
         if self._episode_return_threshold is None:
             return True
         if len(buffer) == 0:
             return False
         return float(np.sum(buffer.rewards)) >= self._episode_return_threshold
 
+    def _can_store_more(self) -> bool:
+        """Whether the stored-transition budget still allows persisting episodes."""
+        if self._max_stored_steps is None:
+            return True
+        return self._storage.total_steps < self._max_stored_steps
+
     def _flush_to_storage(self):
         """Flush all buffers to storage."""
         if self._buffer is not None:
             for buffer in self._buffer:
+                if not self._can_store_more():
+                    break
                 if len(buffer) > 0:
                     if not buffer.terminations[-1]:
                         buffer.truncations[-1] = True
@@ -523,6 +574,18 @@ class DataCollector:
     def set_episode_return_threshold(self, threshold: Optional[float]):
         """Set (or clear with None) the minimum episodic return for an episode to be stored."""
         self._episode_return_threshold = threshold
+
+    def set_per_level_return_thresholds(self, thresholds: Optional[Dict[int, float]]):
+        """Set (or clear with None) per-terrain-level minimum episodic returns.
+
+        When set, it takes precedence over the single global threshold and gates
+        each episode against the threshold of the curriculum level it ran on.
+        """
+        self._per_level_return_thresholds = thresholds
+
+    def set_max_stored_steps(self, max_steps: Optional[int]):
+        """Set (or clear with None) the cap on transitions persisted to storage."""
+        self._max_stored_steps = max_steps
 
     def get_stored_steps(self) -> int:
         """Total number of transitions already flushed to storage."""
