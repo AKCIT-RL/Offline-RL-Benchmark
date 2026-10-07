@@ -5,7 +5,7 @@
 # - Custom step data callback for tensor conversion
 #
 # https://github.com/minari-dataset/minari/blob/main/minari/data_collector/data_collector.py
-# https://github.com/AKCIT-RL/mujoco_playground
+# https://github.com/ANONYMOUS/mujoco_playground
 
 import os
 import shutil

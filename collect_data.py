@@ -136,11 +136,11 @@ class Config:
     dataset_version: int = 0
     difficulty: str = "random"
     algorithm_name: str = "random_policy"
-    author: str = "Luana Martins"
-    author_email: str = "luanagbmartins@gmail.com"
-    code_permalink: str = "https://github.com/AKCIT-RL/mujoco_playground"
+    author: str = "Anonymous Author(s)"
+    author_email: str = "anonymous@anonymous.com"
+    code_permalink: str = "https://github.com/ANONYMOUS/mujoco_playground"
     description: Optional[str] = None
-    minari_dataset_path: str = "/home/luana/Documents/OfflineRL/Benchmark/CORL/datasets"
+    minari_dataset_path: str = "/home/anonymous/Documents/OfflineRL/Benchmark/CORL/datasets"
     command_type: str = None
     num_eval_episodes: int = 20  # Number of episodes to run when evaluating each checkpoint to find peak
     peak_margin_percent: float = 2.0  # Margin percentage for peak selection (e.g., 2.0 means within 2% of max)

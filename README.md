@@ -24,7 +24,7 @@ pip install -r requirements.txt
 3. Install mujoco-playground:
 
 ```bash
-git clone git@github.com:AKCIT-RL/mujoco_playground.git
+git clone git@github.com:ANONYMOUS/mujoco_playground.git
 cd mujoco_playground
 pip install -e ".[all]"
 ```
